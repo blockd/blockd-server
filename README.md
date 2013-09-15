@@ -1,2 +1,2 @@
-blockd-server
+Blockd - A simple distributed lock server
 =============
