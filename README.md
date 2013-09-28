@@ -1,5 +1,6 @@
-Blockd - A simple distributed lock server in Node.js
+Blockd
 =============
+A simple distributed lock server in Node.js
 
 What is It?
 -------------
