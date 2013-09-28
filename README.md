@@ -29,7 +29,13 @@ Open up a new command-line window and use netcat to connect to the server and st
 nc localhost 8000
 ```
 
-The node server will respond and you've started a new session. Try acquiring a lock:
+The node server will respond and you've started a new session. To double-check commands are registering, try asking for some wisdowm:
+
+```
+wisdom
+```
+
+You will be immediately granted enlightenment. Next, you'll probably want to try acquiring a lock:
 
 ```
 lock HelloWorld
