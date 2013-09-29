@@ -250,11 +250,10 @@ var Lock = function(socket, lockId) {
 };
 
 ///
-/// The master object orchestrating locks and releases
+/// A collection of locks
 ///
-var LockBroker = function(net) {
-	
-	this.net = net;
+var LockCollection = function() {
+
 	this.locks = {};
 	this.lockQueue = new LockRequestQueue();
 	
@@ -329,9 +328,12 @@ var LockBroker = function(net) {
 	};
 	
 	///
-	/// Release all locks associated with the given socket
+	/// Release all locks and lock requests associated with the given socket
 	///
 	this.releaseAllForSocket = function(socket) {
+		
+		// Clear the request queue
+		this.lockQueue.clearRequestsForSocket(socket);
 		
 		// The list of candidates
 		var ids = [];
@@ -387,16 +389,6 @@ var LockBroker = function(net) {
 	}
 	
 	///
-	/// Responds with a spiritually useful quote from a great philosopher
-	///
-	this.wisdom = function(socket) {
-		
-		var quote = "I win for me! FOR ME! - Drago";
-		
-		writeSafe(socket, "WISDOM " + quote + "\n");
-	};
-	
-	///
 	/// Sends back a comma-delimited list of locks, describing those currently held
 	///
 	this.show = function(socket) {
@@ -413,7 +405,7 @@ var LockBroker = function(net) {
 			ret += lock.lockId;
 		}
 		
-		writeSafe(socket, "SHOW " + ret + "\n");
+		return ret;
 	};
 	
 	///
@@ -429,6 +421,33 @@ var LockBroker = function(net) {
 		}
 		
 		this.locks = {};
+	};
+};
+
+///
+/// An interface from text commands to the lock collection, etc
+/// This also implements the 
+///
+var LockInterface = function(net) {
+	
+	this.net = net;
+	
+	this.locks = new LockCollection();
+	
+	this.show = function(socket) {
+		
+		var description = this.locks.show();
+		writeSafe(socket, "SHOW " + description + "\n");
+	};
+	
+	///
+	/// Responds with a spiritually useful quote from a great philosopher
+	///
+	this.wisdom = function(socket) {
+		
+		var quote = "I win for me! FOR ME! - Drago";
+		
+		writeSafe(socket, "WISDOM " + quote + "\n");
 	};
 	
 	///
@@ -452,15 +471,15 @@ var LockBroker = function(net) {
 				break;
 			
 			case "ACQUIRE":
-				this.acquire(socket, args[1], args[2]);
+				this.locks.acquire(socket, args[1], args[2]);
 				break;
 				
 			case "RELEASE":
-				this.release(socket, args[1]);
+				this.locks.release(socket, args[1]);
 				break;
 				
 			case "RELEASEALL":
-				this.releaseAll(socket);
+				this.locks.releaseAll(socket);
 				break;
 				
 			case "SHOW":
@@ -477,9 +496,7 @@ var LockBroker = function(net) {
 	///
 	this.onSocketDisconnect = function(socket) {
 		
-		console.log("Socket Disconnected");
-		this.lockQueue.clearRequestsForSocket(socket);
-		this.releaseAllForSocket(socket);
+		this.locks.releaseAllForSocket(socket);
 	};
 	
 	///
@@ -491,15 +508,20 @@ var LockBroker = function(net) {
 		
 		var server = net.createServer(function(socket){
 	
-			console.log("Socket Connected...");
+			log("Socket Connected...");
 
-			socket.write("IMUSTBLOCKYOU\n");
+			// Write to the socket to give it a try, aborting if we can't
+			if(!writeSafe(socket, "IMUSTBLOCKYOU\n")) {
+				return;
+			}
 	
+			// Register callback for when we receive data
 			socket.on("data", function(data) {
 				broker.onSocketData(socket, data);
 			});
 	
 			socket.on("end", function() {
+				log("Socket Disconnected");
 				broker.onSocketDisconnect(socket);
 			});
 		});
@@ -515,7 +537,7 @@ var LockBroker = function(net) {
 
 var net = require('net');
 
-var broker = new LockBroker(net);
+var interface = new LockInterface(net);
 
-broker.start();
+interface.start();
 
