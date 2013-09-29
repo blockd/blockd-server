@@ -1,53 +1,117 @@
 // CONFIGURATION VARIABLES
 
-///
-/// The default timeout for a lock request
-///
-var defaultTimeout = 2000;
+var settings = {
+	
+	///
+	/// The default timeout for a lock request
+	///
+	defaultTimeout : 2000,
+	
+	///
+	/// Port on which the system will listen for connections
+	///
+	port : 8000
+};
 
-///
-/// Port on which the system will listen for connections
-///
-var port = 8000;
 
 // UTILITIES
+
+///
+/// Writes the given data to the given socket, suppressing all errors
+/// Returns true if write successful; otherwise, returns false
+///
+function writeSafe(socket, data) {
+	
+	try
+	{
+		socket.write(data);
+		return true;
+	}
+	catch(err)
+	{
+		console.log("Error writing to socket:" + err.message)
+		return false;
+	}
+}
+
+function log(data)
+{
+	console.log(data);
+}
+
+// PROTOTYPE EXTENSIONS
 
 String.prototype.trim = function() {
 	return this.replace(/^\s+|\s+$/g,"");
 }
 
-// CONSTRUCTORS
+///
+/// Removes the given item from the array
+/// Returns true if removed, else false
+///
+Array.prototype.remove = function(item) {
+	
+	// Find the item and remove it via splice if present
+	var index = this.indexOf(item);
+	if(index > -1) {
+		this.splice(index,1);
+		return true;
+	} else {
+		return false;
+	}
+};
 
 ///
-/// An object that tracks a lock
+/// Scans the array, calling the predicate for each item 
+/// Also accepts an optional onRemove(item) function, which can stop the remove by returning true
 ///
-var Lock = function(socket, lockId) {
+Array.prototype.removeIf = function(predicate, onRemove) {
 	
-	// Properties for later
-	this.socket = socket;
-	this.lockId = lockId;
+	var i = 0;
 	
-	// Indicate lock set
-	console.log("Locking " + lockId + "\n");
-	socket.write("LOCKED " + lockId + "\n");
-	
-	///
-	/// Releases this lock, notifying the connection
-	///
-	this.release = function() {
+	// linear search the array
+	while(i < this.length) {
 		
-		console.log("Releasing " + this.lockId);
+		var item = this[i];
 		
-		try
-		{
-			this.socket.write("RELEASED " + lockId + "\n");
-		}
-		catch(err)
-		{
-			console.log("Error releasing lock:" + err.message)
+		// test predicate
+		if(predicate(item)) {
+			
+			// remove from the queue
+			this.splice(i, 1);
+
+			// if they passed an onRemove function, then call it
+			if(onRemove !== undefined) {
+				// If the onRemove returns false, then we stop
+				if(onRemove(item)) {
+					return;
+				}
+			}
+				
+		} else {
+			i++;
 		}
 	}
 };
+
+///
+/// Finds the first item that matches the given predicate, removing and returning it
+///
+Array.prototype.findAndRemoveIf = function(predicate) {
+	
+	var retItem = undefined;
+	
+	this.removeIf(predicate, 
+		function(item) {
+			retItem = item;
+			return true;
+	});
+	
+	return retItem;
+	
+};
+
+// CONSTRUCTORS
 
 ///
 /// A request for a lock that we must
@@ -59,6 +123,17 @@ var LockRequest = function(socket, lockId) {
 	this.lockId = lockId;
 	
 	console.log("Waiting for lock " + lockId);
+	
+	///
+	/// Notifies the end client their request is dead
+	/// NOTE: This assumes the socket may be dead
+	///
+	this.timeout = function() {
+		
+		// if the lock is still not available, then we timeout
+		log("Timing out " + this.lockId + "\n");
+		writeSafe(this.socket, "ACQUIRETIMEOUT " + lockId + "\n");
+	};
 };
 
 ///
@@ -71,11 +146,26 @@ var LockRequestQueue = function() {
 	
 	///
 	/// Creates a new lock request and adds it to the queue
+	/// Will callback the given function if the request lives to the end of life
+	/// Callback should be of the form: function(request)
 	///
-	this.createRequest = function(socket, lockId) {
+	this.createRequest = function(socket, lockId, timeout, callbackOnTimeout) {
 		
 		var request = new LockRequest(socket, lockId);
 		this.requests.push(request);
+		
+		// Set a timeout that will only fire the callback if this request is live at the end
+		var queue = this;
+		setTimeout(function() {
+			
+			// If it's not still waiting, then cancel this
+			if(!queue.removeRequest(request)) {
+				return;
+			}
+			
+			callbackOnTimeout(request);
+		}, timeout);
+		
 		return request;
 	};
 	
@@ -116,19 +206,9 @@ var LockRequestQueue = function() {
 	///
 	this.clearRequestsForSocket = function(socket) {
 	
-		var i =0;
-		
-		while(i < this.requests.length) {
-			
-			var request = this.requests[i];
-			
-			if(request.socket === socket) {
-				// remove from the queue
-				this.requests.splice(i, 1);
-			} else {
-				i++;
-			}
-		}
+		this.requests.removeIf(function(request){
+			return request.socket === socket;
+		});
 	};
 	
 	///
@@ -137,21 +217,36 @@ var LockRequestQueue = function() {
 	///
 	this.findPendingRequestForLock = function(lockId) {
 		
-		var i =0;
-		
-		while(i < this.requests.length) {
-			
-			var request = this.requests[i];
-			
-			if(request.lockId === lockId) {
-				// remove from the queue
-				this.requests.splice(i, 1);
-				return request;
-			}
-		}
-		
-		return null;
+		return this.requests.findAndRemoveIf(function(item) { return true; });
 	};
+};
+
+///
+/// An object that tracks a lock
+/// On first creation, this will notify the socket that they have a lock
+/// If creation of this object throws an error, that indicates the socket is unable to accept the lock and a new successor should be chosen
+///
+var Lock = function(socket, lockId) {
+	
+	// Properties for later
+	this.socket = socket;
+	this.lockId = lockId;
+	
+	// Indicate lock set
+	console.log("Locking " + lockId + "\n");
+	
+	// If this throw an error, then we know the socket is dead and we want the caller to try again
+	socket.write("LOCKED " + lockId + "\n");
+	
+	///
+	/// Releases this lock, notifying the connection
+	/// NOTE: This assumes the socket may be dead
+	///
+	this.release = function() {
+		
+		log("Releasing " + this.lockId);
+		writeSafe(this.socket, "RELEASED " + lockId + "\n");
+	}
 };
 
 ///
@@ -176,7 +271,8 @@ var LockBroker = function(net) {
 	///
 	this.lock = function(socket, lockId) {
 		
-		this.locks[lockId] = new Lock(socket, lockId);
+		var newLock = new Lock(socket, lockId);
+		this.locks[lockId] = newLock;
 	};
 	
 	///
@@ -184,30 +280,25 @@ var LockBroker = function(net) {
 	///
 	this.acquire = function(socket, lockId, timeout) {
 		
+		timeout = timeout || settings.defaultTimeout;
+		
 		if(!this.isLocked(lockId)) {
 			this.lock(socket, lockId);
 		} else {
 			
-			// Make a new request
-			var request = this.lockQueue.createRequest(socket, lockId);
-
-			var broker = this;			
-			setTimeout(function() {
-				
-				// If it's not still waiting, then cancel this
-				if(!broker.lockQueue.removeRequest(request)) {
-					return;
-				}
-				
-				// if the lock is available, then lock it
-				if(!broker.isLocked(lockId)) {
-					broker.lock(socket, lockId);
-				} else {
-					// if the lock is still not available, then we timeout
-					console.log("Timing out " + lockId + "\n");
-					socket.write("ACQUIRETIMEOUT " + lockId + "\n");
-				}
-			}, timeout);
+			// Make a new request in the queue
+			var broker = this;
+			
+			this.lockQueue.createRequest(socket, lockId, timeout,
+				function(request) {
+					
+					// if the lock is available, then lock it
+					if(!broker.isLocked(lockId)) {
+						broker.lock(socket, lockId);
+					} else {
+						request.timeout();
+					}
+				});
 		}
 	};
 	
@@ -222,7 +313,10 @@ var LockBroker = function(net) {
 		// If we didn't find anything, then return an error
 		if(lock === false) {
 			
-			socket.write("NOLOCKTORELEASE " + lockId + "\n");
+			// Try to notify there is lock lock
+			// NOTE: This assumes the socket may be dead
+			log("Could not find lock to release by ID" + lockId)
+			writeSafe(socket, "NOLOCKTORELEASE " + lockId + "\n");
 			return;
 		} 
 		
@@ -230,13 +324,67 @@ var LockBroker = function(net) {
 		lock.release();
 		delete this.locks[lockId];
 		
-		// Go look for a request to fill the lock
-		var request = this.lockQueue.findPendingRequestForLock(lockId);
-		if(request != null) {
-			// apply the lock
-			this.lock(request.socket, request.lockId);
-		}
+		// Find a new owner
+		this.abdicateLock(lockId);
 	};
+	
+	///
+	/// Release all locks associated with the given socket
+	///
+	this.releaseAllForSocket = function(socket) {
+		
+		// The list of candidates
+		var ids = [];
+		
+		// Iterate through all locks, making a candidate list
+		for(var i in this.locks) {
+			
+			var lock = this.locks[i];
+			
+			if(lock.socket === socket) {
+				ids.push(i);
+			}
+		}
+		
+		// Iterate through the candidates and release them
+		for(var i = 0; i < ids.length; ++i) {
+			var id = ids[i];
+			this.release(socket, id);
+		}
+	}
+	
+	///
+	/// Attempts to find a new holder for the given lockId by analyzing the queue
+	///
+	this.abdicateLock = function(lockId) {
+		
+		// Go look for a request to fill the lock
+		
+		var isSuccessorFound = false;
+		
+		// Keep trying until we're out of candidates or find a good one
+		while(!isSuccessorFound) {
+		
+			try
+			{
+				// Look in the queue
+				var request = this.lockQueue.findPendingRequestForLock(lockId);
+				if(request != null) {
+					// if we found one, then try to apply the lock
+					this.lock(request.socket, request.lockId);
+				} else {
+					// No successor found
+					isSuccessorFound = true;
+				}
+				
+				isSuccessorFound = true;
+			}
+			catch(err)
+			{
+				log("Error trying to abdicate lock " + err.message);
+			}
+		}
+	}
 	
 	///
 	/// Responds with a spiritually useful quote from a great philosopher
@@ -245,25 +393,35 @@ var LockBroker = function(net) {
 		
 		var quote = "I win for me! FOR ME! - Drago";
 		
-		socket.write("WISDOM " + quote + "\n");
+		writeSafe(socket, "WISDOM " + quote + "\n");
 	};
 	
 	///
-	/// Sends back a description of all current locks
+	/// Sends back a comma-delimited list of locks, describing those currently held
 	///
 	this.show = function(socket) {
 		
-		socket.write("SHOW\n");
+		log("Showing locks");
+				
+		var ret = "";
+		
 		for(var lockId in this.locks) {
+			
+			ret = ret != "" ? ret + "," : ret;
+			 
 			var lock = this.locks[lockId];
-			socket.write(lock.lockId + "\n");
+			ret += lock.lockId;
 		}
+		
+		writeSafe(socket, "SHOW " + ret + "\n");
 	};
 	
 	///
 	/// Releases all held locks
 	///
 	this.releaseAll = function(socket) {
+		
+		log("Releasing ALL locks");
 		
 		for(var lockId in this.locks) {
 			var lock = this.locks[lockId];
@@ -294,7 +452,7 @@ var LockBroker = function(net) {
 				break;
 			
 			case "ACQUIRE":
-				this.acquire(socket, args[1], args[2] || defaultTimeout);
+				this.acquire(socket, args[1], args[2]);
 				break;
 				
 			case "RELEASE":
@@ -321,6 +479,7 @@ var LockBroker = function(net) {
 		
 		console.log("Socket Disconnected");
 		this.lockQueue.clearRequestsForSocket(socket);
+		this.releaseAllForSocket(socket);
 	};
 	
 	///
@@ -345,8 +504,8 @@ var LockBroker = function(net) {
 			});
 		});
 	
-		server.listen(port, function() {
-			console.log("Listening on port " + port);
+		server.listen(settings.port, function() {
+			console.log("Listening on port " + settings.port);
 		});
 	}
 };
