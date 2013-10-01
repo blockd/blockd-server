@@ -245,34 +245,6 @@ var LockRequestQueue = function() {
 };
 
 ///
-/// An object that tracks a lock
-/// On first creation, this will notify the socket that they have a lock
-/// If creation of this object throws an error, that indicates the socket is unable to accept the lock and a new successor should be chosen
-///
-var Lock = function(socket, lockId) {
-	
-	// Properties for later
-	this.socket = socket;
-	this.lockId = lockId;
-	
-	// Indicate lock set
-	console.log("Locking " + lockId + "\n");
-	
-	// If this throw an error, then we know the socket is dead and we want the caller to try again
-	socket.write("LOCKED " + lockId + "\n");
-	
-	///
-	/// Releases this lock, notifying the connection
-	/// NOTE: This assumes the socket may be dead
-	///
-	this.release = function() {
-		
-		log("Releasing " + this.lockId);
-		writeSafe(this.socket, "RELEASED " + lockId + "\n");
-	}
-};
-
-///
 /// A lock supporting many readers simultaneous readers and one writer
 /// This manages its own queue of requests
 /// This can configure whether or not it forces new readers to wait once a write request arrives (not greedy) or whether it allows new readers when a waiting write request is there
@@ -466,14 +438,14 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 
 			var nextReader = this.readerQueue.findPendingRequest();
 			if(nextReader != null)
-				this.lockRead(nextReader);
+				this.lockRead(nextReader.socket);
 		}
 
 		// Apply the writer
 		if(this.writerQueue.hasRequests() && this.isWriteAvailable()) {
 
 			var nextWriter = this.writerQueue.findPendingRequest();
-			this.lockWrite(nextWriter);
+			this.lockWrite(nextWriter.socket);
 		}
 	}
 	
