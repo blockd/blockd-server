@@ -10,7 +10,12 @@ var settings = {
 	///
 	/// Port on which the system will listen for connections
 	///
-	port : 8000
+	port : 8000,
+	
+	///
+	/// Sets the default reader greed for a readerWriter lock
+	///
+	defaultReaderGreed : false
 };
 
 
@@ -29,7 +34,7 @@ function writeSafe(socket, data) {
 	}
 	catch(err)
 	{
-		console.log("Error writing to socket:" + err.message)
+		console.log("Error writing to socket:" + err.message);
 		return false;
 	}
 }
@@ -143,6 +148,14 @@ var LockRequestQueue = function() {
 
 	// The queue of requests (earlier is better)
 	this.requests = [];
+
+	///
+	/// Returns true if this queue has requests in it
+	///
+	this.hasRequests = function() {
+
+		return this.requests.length > 0;
+	};
 	
 	///
 	/// Creates a new lock request and adds it to the queue
@@ -151,6 +164,7 @@ var LockRequestQueue = function() {
 	///
 	this.createRequest = function(socket, lockId, timeout, callbackOnTimeout) {
 		
+		log("Queueing request for lock " + lockId + " for " + timeout)
 		var request = new LockRequest(socket, lockId);
 		this.requests.push(request);
 		
@@ -217,6 +231,15 @@ var LockRequestQueue = function() {
 	///
 	this.findPendingRequestForLock = function(lockId) {
 		
+		return this.requests.findAndRemoveIf(function(item) { return item.lockId == lockId; });
+	};
+
+	///
+	/// Finds the highest priority pending lock request for the given lockId
+	/// If not lockId found, return null
+	///
+	this.findPendingRequest = function() {
+		
 		return this.requests.findAndRemoveIf(function(item) { return true; });
 	};
 };
@@ -250,55 +273,325 @@ var Lock = function(socket, lockId) {
 };
 
 ///
+/// A lock supporting many readers simultaneous readers and one writer
+/// This manages its own queue of requests
+/// This can configure whether or not it forces new readers to wait once a write request arrives (not greedy) or whether it allows new readers when a waiting write request is there
+///
+var ReaderWriterLock = function(lockId, greedyReaders) {
+
+	this.lockId = lockId;
+	this.greedyReaders = greedyReaders || settings.defaultReaderGreed;
+
+	this.writer = null;
+	this.writerQueue = new LockRequestQueue();
+	
+	this.readers = [];
+	this.readerQueue = new LockRequestQueue();
+	
+	///
+	/// Returns true if currently writer locked; otherwise, returns false
+	///
+	this.isWriteLocked = function() {
+		
+		return this.writer != null;
+	};
+	
+	///
+	/// Returns true if there are currently requesters holding the writer lock; otherwise, returns false
+	/// NOTE: This returns false if currently write locked
+	///
+	this.isReadLocked = function() {
+	
+		return this.readers.length > 0;
+	};
+
+	///
+	/// Returns true if the read lock is available; otherwise returns false
+	/// NOTE: This factors in the reader greed setting when making its determination
+	///
+	this.isReadAvailable = function() {
+		
+		if(this.greedyReaders) {
+			
+			// If we have greedy readers, then read is available as long as there is no write locks currently in place
+			return !this.isWriteLocked();
+		} else {
+
+			// If we're not in greed mode, then read is only available when no one is writing and no one is waiting to write
+			return !this.isWriteLocked() && !this.writerQueue.hasRequests();
+		}
+	};
+
+	///
+	/// Returns true if this lock has no one holding it and no one waiting for it; otherwise, return false
+	///
+	this.isAbandoned = function() {
+
+		return !this.isWriteLocked() && !this.isReadLocked() && !this.readerQueue.hasRequests() && !this.writerQueue.hasRequests();
+	};
+
+	/// 
+	/// Scans the list of readers to see if the given socket is one of the readers
+	///
+	this.isSocketReader = function(socket) {
+
+		for(var i = 0; i < this.readers.length; ++i) {
+			var readerSocket = this.readers[i];
+			if(readerSocket === socket)
+				return true;
+		}
+
+		return false;
+	};
+
+	///
+	/// Returns true if the write lock is available
+	///
+	this.isWriteAvailable = function() {
+
+		// We have to be completely open for write to be available
+		return !(this.isWriteLocked() || this.isReadLocked());
+	};
+
+	///
+	/// Does the real action of applying the read lock
+	///
+	this.lockRead = function(socket) {
+
+		// Indicate lock set
+		console.log("Read locking " + this.lockId + "\n");
+		
+		// If this throw an error, then we know the socket is dead and we want the caller to try again
+		socket.write("LOCKED R " + this.lockId + "\n");
+
+		// Add to the list of readers
+		this.readers.push(socket);
+	};
+
+	///
+	/// Does the real action of applying the write lock
+	///
+	this.lockWrite = function(socket) {
+
+		// Indicate lock set
+		console.log("Write locking " + this.lockId + "\n");
+		
+		// If this throw an error, then we know the socket is dead and we want the caller to try again
+		socket.write("LOCKED W " + this.lockId + "\n");
+
+		// Add to the list of readers
+		this.writer = socket;
+	};
+	
+	///
+	/// This will cause a socket to either immediately acquire the write lock or go into a queue waiting for it
+	///	
+	this.acquireRead = function (socket, timeout) {
+
+		// Use default if not available
+		timeout = timeout || settings.defaultTimeout;
+
+		// Double-check this socket is not currently a reader
+		if(this.isSocketReader(socket) || this.writer === socket) {
+
+			log("Reader attempting to acquire lock already held: " + this.lockId);
+			socket.write("ACQUIRED " + this.lockId + "\n");
+
+			return;
+		}
+
+		// If we can acquire now, then do it!
+		if(this.isReadAvailable()) {
+
+			this.lockRead(socket);
+		} else {
+
+			// If we have to wait, then queue
+			var lock = this;
+			this.readerQueue.createRequest(socket, this.lockId, timeout, function(request) {
+				
+				// if the lock is available, then lock it
+				if(lock.isReadAvailable()) {
+					
+					this.lockRead(socket);
+				} else {
+
+					request.timeout();
+				}
+			});
+		}
+	};
+	
+	///
+	/// This will cause a socket to either immdiately acquire the write lock or go into the queue waiting for it
+	///
+	this.acquireWrite = function(socket, timeout) {
+		
+		// TODO: There is one special case where if the only reader is the current socket, then it must upgrade the lock
+
+		// Use default if not available
+		timeout = timeout || settings.defaultTimeout;
+
+		// If we can acquire now, then do it!
+		if(this.isWriteAvailable()) {
+
+			this.lockWrite(socket);
+		} else {
+
+			// If we have to wait, then queue
+			var lock = this;
+			this.writerQueue.createRequest(socket, this.lockId, timeout, function(request) {
+				
+				// if the lock is available, then lock it
+				if(lock.isWriteAvailable()) {
+					
+					this.lockWrite(socket);
+				} else {
+
+					request.timeout();
+				}
+			});
+		}
+	};
+
+	///
+	/// This will use the current state of the lock to determine who's next
+	///
+	this.abdicateLock = function() {
+
+		// NOTE: In theory, the readAvailable/writeAvailable logic ensures these do not both happen
+
+		// Burn through all possible read requests
+		while(this.readerQueue.hasRequests() && this.isReadAvailable()) {
+
+			var nextReader = this.readerQueue.findPendingRequest();
+			if(nextReader != null)
+				this.lockRead(nextReader);
+		}
+
+		// Apply the writer
+		if(this.writerQueue.hasRequests() && this.isWriteAvailable()) {
+
+			var nextWriter = this.writerQueue.findPendingRequest();
+			this.lockWrite(nextWriter);
+		}
+	}
+	
+	///
+	/// This will cause the given socket to release its lock on it (be it read or write)
+	///
+	this.release = function(socket) {
+
+		// If we don't really have a value for socket, the abort quietly
+		if(!socket)
+			return;
+		
+		var someLockReleased = false;
+
+		// Check if we're releasing the writer
+		if(this.writer == socket) {
+			
+			log("Releasing write lock for " + this.lockId);
+			this.writer = null;
+			writeSafe(socket, "RELEASED " + this.lockId + "\n");
+			someLockReleased = true;
+		}
+
+		// Check if we're releasing a reader
+		if(this.isSocketReader(socket)) {
+
+			log("Releasing write lock for " + this.lockId);
+			this.readers.remove(socket);
+			writeSafe(socket, "RELEASED " + this.lockId + "\n");
+			someLockReleased = true;
+		}
+
+		// If we didn't release anything, then report back
+		if(!someLockReleased) {
+			// Try to notify there is lock lock
+			// NOTE: This assumes the socket may be dead
+			log("Could not find lock to release by ID" + this.lockId)
+			writeSafe(socket, "NOLOCKTORELEASE " + this.lockId + "\n");
+			return;
+		} else {
+
+			// If we released something, then fire logic to possibly abdicate lock based on new state
+			this.abdicateLock();
+		}
+
+	};
+
+	///
+	/// Releases all readers and writers for the current lock
+	///
+	this.releaseAll = function() {
+
+		this.readerQueue.clearRequests();
+		this.writerQueue.clearRequests();
+
+		this.release(this.writer);
+
+		this.readers.removeIf(function(socket) { return true; },
+			function(socket) {
+				this.release(socket);
+			});
+	};
+
+	///
+	/// Returns a string descriptor for the state of this lock
+	///
+	this.show = function() {
+
+		return this.lockId;
+	};
+}
+
+///
 /// A collection of locks
 ///
 var LockCollection = function() {
 
 	this.locks = {};
 	this.lockQueue = new LockRequestQueue();
-	
+
 	///
-	/// Returns true if the given lock ID is occupied; otherwise returns false
+	/// Gets the lock associated with the given ID
 	///
-	this.isLocked = function(lockId) {
-		
-		return lockId in this.locks;
+	this.getLock = function(lockId) {
+
+		if(!(lockId in this.locks))
+			this.locks[lockId] = new ReaderWriterLock(lockId);
+
+		return this.locks[lockId];
+	};
+
+	///
+	/// Checks if the given lockId is abandoned and deletes it if available
+	///
+	this.cleanupLock = function(lock) {
+
+		if(lock.isAbandoned())
+			delete this.locks[lock.lockId];
 	};
 	
 	///
-	/// Locks for the given socket and lockId
+	/// Acquires the given read lock
 	///
-	this.lock = function(socket, lockId) {
+	this.acquireRead = function(socket, lockId, timeout) {
 		
-		var newLock = new Lock(socket, lockId);
-		this.locks[lockId] = newLock;
+		var lock = this.getLock(lockId);
+
+		lock.acquireRead(socket, timeout);
 	};
-	
+
 	///
-	/// Acquires the given lock
+	/// Acquire the given write lock
 	///
-	this.acquire = function(socket, lockId, timeout) {
-		
-		timeout = timeout || settings.defaultTimeout;
-		
-		if(!this.isLocked(lockId)) {
-			this.lock(socket, lockId);
-		} else {
-			
-			// Make a new request in the queue
-			var broker = this;
-			
-			this.lockQueue.createRequest(socket, lockId, timeout,
-				function(request) {
-					
-					// if the lock is available, then lock it
-					if(!broker.isLocked(lockId)) {
-						broker.lock(socket, lockId);
-					} else {
-						request.timeout();
-					}
-				});
-		}
+	this.acquireWrite = function(socket, lockId, timeout) {
+
+		var lock = this.getLock(lockId);
+
+		lock.acquireWrite(socket, timeout);
 	};
 	
 	///
@@ -306,25 +599,11 @@ var LockCollection = function() {
 	///
 	this.release = function(socket, lockId) {
 		
-		// Retrieve the lock
-		var lock = this.locks[lockId] || false;
-		
-		// If we didn't find anything, then return an error
-		if(lock === false) {
-			
-			// Try to notify there is lock lock
-			// NOTE: This assumes the socket may be dead
-			log("Could not find lock to release by ID" + lockId)
-			writeSafe(socket, "NOLOCKTORELEASE " + lockId + "\n");
-			return;
-		} 
-		
-		// Release the lock
-		lock.release();
-		delete this.locks[lockId];
-		
-		// Find a new owner
-		this.abdicateLock(lockId);
+		var lock = this.getLock(lockId);
+
+		lock.release(socket);
+
+		this.cleanupLock(lock);
 	};
 	
 	///
@@ -332,59 +611,12 @@ var LockCollection = function() {
 	///
 	this.releaseAllForSocket = function(socket) {
 		
-		// Clear the request queue
-		this.lockQueue.clearRequestsForSocket(socket);
-		
-		// The list of candidates
-		var ids = [];
-		
-		// Iterate through all locks, making a candidate list
 		for(var i in this.locks) {
-			
 			var lock = this.locks[i];
-			
-			if(lock.socket === socket) {
-				ids.push(i);
-			}
-		}
-		
-		// Iterate through the candidates and release them
-		for(var i = 0; i < ids.length; ++i) {
-			var id = ids[i];
-			this.release(socket, id);
-		}
-	}
-	
-	///
-	/// Attempts to find a new holder for the given lockId by analyzing the queue
-	///
-	this.abdicateLock = function(lockId) {
-		
-		// Go look for a request to fill the lock
-		
-		var isSuccessorFound = false;
-		
-		// Keep trying until we're out of candidates or find a good one
-		while(!isSuccessorFound) {
-		
-			try
-			{
-				// Look in the queue
-				var request = this.lockQueue.findPendingRequestForLock(lockId);
-				if(request != null) {
-					// if we found one, then try to apply the lock
-					this.lock(request.socket, request.lockId);
-				} else {
-					// No successor found
-					isSuccessorFound = true;
-				}
-				
-				isSuccessorFound = true;
-			}
-			catch(err)
-			{
-				log("Error trying to abdicate lock " + err.message);
-			}
+
+			lock.release(socket);
+
+			this.cleanupLock(lock);
 		}
 	}
 	
@@ -402,7 +634,7 @@ var LockCollection = function() {
 			ret = ret != "" ? ret + "," : ret;
 			 
 			var lock = this.locks[lockId];
-			ret += lock.lockId;
+			ret += lock.show();
 		}
 		
 		return ret;
@@ -417,7 +649,8 @@ var LockCollection = function() {
 		
 		for(var lockId in this.locks) {
 			var lock = this.locks[lockId];
-			lock.release();
+			lock.releaseAll();
+			delete this.locks[lockId];
 		}
 		
 		this.locks = {};
@@ -426,7 +659,6 @@ var LockCollection = function() {
 
 ///
 /// An interface from text commands to the lock collection, etc
-/// This also implements the 
 ///
 var LockInterface = function(net) {
 	
@@ -471,7 +703,12 @@ var LockInterface = function(net) {
 				break;
 			
 			case "ACQUIRE":
-				this.locks.acquire(socket, args[1], args[2]);
+				var mode = args[3] || "W";
+				mode = mode.toUpperCase();
+				if(mode == "W")
+					this.locks.acquireWrite(socket, args[1], args[2]);
+				else
+					this.locks.acquireRead(socket, args[1], args[2]);
 				break;
 				
 			case "RELEASE":
@@ -540,4 +777,3 @@ var net = require('net');
 var interface = new LockInterface(net);
 
 interface.start();
-
