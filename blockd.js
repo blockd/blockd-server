@@ -390,7 +390,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		if(this.isSocketReader(socket) || this.writer === socket) {
 
 			log("Reader attempting to acquire lock already held: " + this.lockId);
-			socket.write("ACQUIRED " + this.lockId + "\n");
+			socket.write("LOCKED R " + this.lockId + "\n");
 
 			return;
 		}
@@ -424,6 +424,15 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 
 		// Use default if not available
 		timeout = timeout || settings.defaultTimeout;
+
+		// Double-check this socket is not currently a reader
+		if(this.writer === socket) {
+
+			log("Writer attempting to acquire lock already held: " + this.lockId);
+			socket.write("LOCKED W " + this.lockId + "\n");
+
+			return;
+		}
 
 		// If we can acquire now, then do it!
 		if(this.isWriteAvailable(socket)) {
@@ -473,7 +482,10 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	///
 	/// This will cause the given socket to release its lock on it (be it read or write)
 	///
-	this.release = function(socket) {
+	this.release = function(socket, reportNoLocks) {
+
+		if(reportNoLocks === undefined)
+			reportNoLocks = true;
 
 		// If we don't really have a value for socket, the abort quietly
 		if(!socket)
@@ -500,7 +512,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		}
 
 		// If we didn't release anything, then report back
-		if(!someLockReleased) {
+		if(!someLockReleased && reportNoLocks) {
 			// Try to notify there is lock lock
 			// NOTE: This assumes the socket may be dead
 			log("Could not find lock to release by ID" + this.lockId)
@@ -512,6 +524,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 			this.abdicateLock();
 		}
 
+		return someLockReleased;
 	};
 
 	///
@@ -524,10 +537,14 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 
 		this.release(this.writer);
 
+		var anyLocksReleased = false;
 		this.readers.removeIf(function(socket) { return true; },
 			function(socket) {
+				anyLocksReleased = true;
 				this.release(socket);
 			});
+
+		return anyLocksReleased;
 	};
 
 	///
@@ -607,20 +624,6 @@ var LockCollection = function() {
 	};
 	
 	///
-	/// Release all locks and lock requests associated with the given socket
-	///
-	this.releaseAllForSocket = function(socket) {
-		
-		for(var i in this.locks) {
-			var lock = this.locks[i];
-
-			lock.release(socket);
-
-			this.cleanupLock(lock);
-		}
-	}
-	
-	///
 	/// Sends back a comma-delimited list of locks, describing those currently held
 	///
 	this.show = function(socket) {
@@ -641,19 +644,26 @@ var LockCollection = function() {
 	};
 	
 	///
-	/// Releases all held locks
+	/// Releases all lock held by the given socket
 	///
 	this.releaseAll = function(socket) {
 		
-		log("Releasing ALL locks");
+		log("Releasing ALL locks for the socket");
 		
+		var locksReleased = false;
+
 		for(var lockId in this.locks) {
 			var lock = this.locks[lockId];
-			lock.releaseAll();
-			delete this.locks[lockId];
+			var anyLockRelease = lock.release(socket, false);
+			locksReleased = anyLockRelease ? true : locksReleased;
+			if(lock.isAbandoned())
+				delete this.locks[lockId];
 		}
-		
-		this.locks = {};
+
+		if(!locksReleased) {
+
+			writeSafe(socket, "NOLOCKSTORELEASEALL\n");
+		}
 	};
 };
 
@@ -714,6 +724,13 @@ var LockInterface = function(net) {
 				break;
 			
 			case "ACQUIRE":
+
+				// Check arguments
+				if(args[1] == undefined) {
+					socket.write("CANNOTACQUIREINVALIDLOCKID");
+					break;
+				}
+
 				var mode = args[3] || "W";
 				mode = mode.toUpperCase();
 				if(mode == "W")
