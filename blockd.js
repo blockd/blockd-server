@@ -22,6 +22,14 @@ var settings = {
 // UTILITIES
 
 ///
+/// Utiltity function for logging
+///
+function log(data)
+{
+	console.log(data);
+}
+
+///
 /// Writes the given data to the given socket, suppressing all errors
 /// Returns true if write successful; otherwise, returns false
 ///
@@ -34,18 +42,17 @@ function writeSafe(socket, data) {
 	}
 	catch(err)
 	{
-		console.log("Error writing to socket:" + err.message);
+		log("Error writing to socket:" + err.message);
 		return false;
 	}
 }
 
-function log(data)
-{
-	console.log(data);
-}
 
 // PROTOTYPE EXTENSIONS
 
+///
+/// Removes leading and trailing whitespaces
+///
 String.prototype.trim = function() {
 	return this.replace(/^\s+|\s+$/g,"");
 }
@@ -127,7 +134,7 @@ var LockRequest = function(socket, lockId) {
 	this.socket = socket;
 	this.lockId = lockId;
 	
-	console.log("Waiting for lock " + lockId);
+	log("Waiting for lock " + lockId);
 	
 	///
 	/// Notifies the end client their request is dead
@@ -244,6 +251,9 @@ var LockRequestQueue = function() {
 	};
 };
 
+// Add to exports for this module
+exports.LockCollection = LockRequestQueue;
+
 ///
 /// A lock supporting many readers simultaneous readers and one writer
 /// This manages its own queue of requests
@@ -319,7 +329,17 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	///
 	/// Returns true if the write lock is available
 	///
-	this.isWriteAvailable = function() {
+	this.isWriteAvailable = function(socket) {
+
+		// If we were given a socket to compare against, then check the case where we might be able to upgrade
+		if(socket) {
+
+			// If not write locked and 
+			if(!this.isWriteLocked() && this.readers.length == 1 && this.isSocketReader(socket)) {
+				log("Able to upgrade read to write for lock " + this.lockId);
+				return true;
+			}
+		}
 
 		// We have to be completely open for write to be available
 		return !(this.isWriteLocked() || this.isReadLocked());
@@ -331,7 +351,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	this.lockRead = function(socket) {
 
 		// Indicate lock set
-		console.log("Read locking " + this.lockId + "\n");
+		log("Read locking " + this.lockId + "\n");
 		
 		// If this throw an error, then we know the socket is dead and we want the caller to try again
 		socket.write("LOCKED R " + this.lockId + "\n");
@@ -345,8 +365,11 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	///
 	this.lockWrite = function(socket) {
 
+		// Be sure to remove any readers this might have
+		this.readers.remove(socket);
+
 		// Indicate lock set
-		console.log("Write locking " + this.lockId + "\n");
+		log("Write locking " + this.lockId + "\n");
 		
 		// If this throw an error, then we know the socket is dead and we want the caller to try again
 		socket.write("LOCKED W " + this.lockId + "\n");
@@ -398,14 +421,12 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	/// This will cause a socket to either immdiately acquire the write lock or go into the queue waiting for it
 	///
 	this.acquireWrite = function(socket, timeout) {
-		
-		// TODO: There is one special case where if the only reader is the current socket, then it must upgrade the lock
 
 		// Use default if not available
 		timeout = timeout || settings.defaultTimeout;
 
 		// If we can acquire now, then do it!
-		if(this.isWriteAvailable()) {
+		if(this.isWriteAvailable(socket)) {
 
 			this.lockWrite(socket);
 		} else {
@@ -518,12 +539,16 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	};
 }
 
+// Add to exports for this module
+exports.LockCollection = ReaderWriterLock;
+
 ///
 /// A collection of locks
 ///
 var LockCollection = function() {
 
-	this.locks = {};
+	// Thanks Nate :) No protype = no hacking
+	this.locks = Object.create(null);
 	this.lockQueue = new LockRequestQueue();
 
 	///
@@ -539,11 +564,14 @@ var LockCollection = function() {
 
 	///
 	/// Checks if the given lockId is abandoned and deletes it if available
+	/// This keeps abandoned instances of the ReaderWriter lock from lingering in memory
 	///
 	this.cleanupLock = function(lock) {
 
-		if(lock.isAbandoned())
+		if(lock.isAbandoned()) {
+			log("Deleting lock instance for " + lock.lockId);
 			delete this.locks[lock.lockId];
+		}
 	};
 	
 	///
@@ -629,6 +657,12 @@ var LockCollection = function() {
 	};
 };
 
+// Add to exports for this module
+exports.LockCollection = LockCollection;
+
+// Bring in the file of great wisdom
+var dolph = require("./dolph.json");
+
 ///
 /// An interface from text commands to the lock collection, etc
 ///
@@ -638,6 +672,9 @@ var LockInterface = function(net) {
 	
 	this.locks = new LockCollection();
 	
+	///
+	/// Responds to the show command with info for all locks
+	///
 	this.show = function(socket) {
 		
 		var description = this.locks.show();
@@ -649,7 +686,9 @@ var LockInterface = function(net) {
 	///
 	this.wisdom = function(socket) {
 		
-		var quote = "I win for me! FOR ME! - Drago";
+		var randomIndex = Math.floor(Math.random()*dolph.length);
+
+		var quote = dolph[randomIndex];
 		
 		writeSafe(socket, "WISDOM " + quote + "\n");
 	};
@@ -661,7 +700,7 @@ var LockInterface = function(net) {
 		
 		data = data.toString().trim();
 		
-		console.log("Received data: '" + data + "'\n");
+		log("Received data: '" + data + "'\n");
 		
 		var args = data.split(" ");
 		var commandName = args[0];
@@ -736,11 +775,10 @@ var LockInterface = function(net) {
 		});
 	
 		server.listen(settings.port, function() {
-			console.log("Listening on port " + settings.port);
+			log("Listening on port " + settings.port);
 		});
 	}
 };
-
 
 // START
 
