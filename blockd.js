@@ -10,7 +10,7 @@ var settings = {
 	///
 	/// Port on which the system will listen for connections
 	///
-	port : 8000,
+	port : 11311,
 	
 	///
 	/// Sets the default reader greed for a readerWriter lock
@@ -761,7 +761,7 @@ var LockInterface = function(net) {
 	///
 	this.onSocketDisconnect = function(socket) {
 		
-		this.locks.releaseAllForSocket(socket);
+		this.locks.releaseAll(socket);
 	};
 	
 	///
