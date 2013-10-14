@@ -1,22 +1,6 @@
 // CONFIGURATION VARIABLES
 
-var settings = {
-	
-	///
-	/// The default timeout for a lock request
-	///
-	defaultTimeout : 2000,
-	
-	///
-	/// Port on which the system will listen for connections
-	///
-	port : 11311,
-	
-	///
-	/// Sets the default reader greed for a readerWriter lock
-	///
-	defaultReaderGreed : false
-};
+var settings = require("./settings.json");
 
 
 // UTILITIES
@@ -557,7 +541,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 }
 
 // Add to exports for this module
-exports.LockCollection = ReaderWriterLock;
+exports.ReaderWriterLock = ReaderWriterLock;
 
 ///
 /// A collection of locks
