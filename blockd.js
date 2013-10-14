@@ -31,6 +31,24 @@ function writeSafe(socket, data) {
 	}
 }
 
+///
+/// Writes the given data to the socket as an end command, suppressing all errors
+/// Returns true if successful; otherwise, returns false
+///
+function endSafe(socket, data) {
+	
+	try
+	{
+		socket.end(data);
+		return true;
+	}
+	catch(err)
+	{
+		log("Error ending socket:" + err.message);
+		return false;
+	}	
+}
+
 
 // PROTOTYPE EXTENSIONS
 
@@ -439,7 +457,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 					
 					this.lockWrite(socket);
 				} else {
-					
+
 					request.timeout();
 				}
 			});
@@ -739,6 +757,11 @@ var LockInterface = function(net) {
 				
 			case "SHOW":
 				this.show(socket);
+				break;
+
+			case "QUIT":
+				this.locks.releaseAll(socket);
+				endSafe(socket, "GOINPIECES\n");
 				break;
 				
 			default:
