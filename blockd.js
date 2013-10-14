@@ -385,6 +385,9 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 			this.lockRead(socket);
 		} else {
 
+			// Respond with Pending status
+			writeSafe(socket, "LOCKPENDING R " + this.lockId + "\n");
+
 			// If we have to wait, then queue
 			var lock = this;
 			this.readerQueue.createRequest(socket, this.lockId, timeout, function(request) {
@@ -423,6 +426,9 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 
 			this.lockWrite(socket);
 		} else {
+			
+			// Respond with Pending status
+			writeSafe(socket, "LOCKPENDING W " + this.lockId + "\n");
 
 			// If we have to wait, then queue
 			var lock = this;
@@ -433,7 +439,7 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 					
 					this.lockWrite(socket);
 				} else {
-
+					
 					request.timeout();
 				}
 			});
