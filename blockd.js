@@ -761,6 +761,7 @@ var LockInterface = function(net) {
 
 			case "QUIT":
 				this.locks.releaseAll(socket);
+				socket.removeAllListeners();
 				endSafe(socket, "GOINPIECES\n");
 				break;
 				
