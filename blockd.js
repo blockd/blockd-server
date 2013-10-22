@@ -1,16 +1,30 @@
-// CONFIGURATION VARIABLES
+// CONFIGURATION VARIABLES ====================================================
 
 var settings = require("./settings.json");
 
-
-// UTILITIES
+// UTILITIES ====================================================
 
 ///
 /// Utiltity function for logging
 ///
 function log(data)
 {
-	console.log(data);
+	console.log("Blockd Server: " + data);
+}
+
+///
+/// Parses the given string and suppresses all errors, returning an empty object if failed
+///
+function parseSafe(data) {
+	try
+	{
+		return JSON.parse(data);
+	}
+	catch(err)
+	{
+		log("Error parsing data: " + err.message);
+		return {};
+	}
 }
 
 ///
@@ -32,6 +46,15 @@ function writeSafe(socket, data) {
 }
 
 ///
+/// Writes the given JSON data to the socket, suppressing all errors from the write
+/// NOTE: This will NOT suppress errors from stringifying the data
+///
+function writeJsonSafe(socket, data) {
+
+	return writeSafe(socket, JSON.stringify(data) + "\n");
+}
+
+///
 /// Writes the given data to the socket as an end command, suppressing all errors
 /// Returns true if successful; otherwise, returns false
 ///
@@ -49,8 +72,25 @@ function endSafe(socket, data) {
 	}	
 }
 
+///
+/// Writes the given JSON data to the socket as an end command, suppressing all errors
+/// Returns true if successful; otherwise, returns false
+///
+function endJsonSafe(socket, data) {
+	return endSafe(socket, JSON.stringify(data) + "\n");
+}
 
-// PROTOTYPE EXTENSIONS
+///
+/// Adds the given object to the given array, but only if the object is not undefined or null
+///
+function pushIfDefined(array, obj) {
+
+	if(obj !== undefined && obj !== null)
+		array.push(obj);
+}
+
+
+// PROTOTYPE EXTENSIONS ====================================================
 
 ///
 /// Removes leading and trailing whitespaces
@@ -130,13 +170,14 @@ Array.prototype.findAndRemoveIf = function(predicate) {
 ///
 /// A request for a lock that we must
 ///
-var LockRequest = function(socket, lockId) {
+var LockRequest = function(socket, args) {
 	
 	// Properties for later
 	this.socket = socket;
-	this.lockId = lockId;
+	this.lockId = args.lockId;
+	this.nonce = args.nonce;
 	
-	log("Waiting for lock " + lockId);
+	log("Requesting lock " + this.lockId);
 	
 	///
 	/// Notifies the end client their request is dead
@@ -146,7 +187,14 @@ var LockRequest = function(socket, lockId) {
 		
 		// if the lock is still not available, then we timeout
 		log("Timing out " + this.lockId + "\n");
-		writeSafe(this.socket, "ACQUIRETIMEOUT " + lockId + "\n");
+
+		var msg = {
+			status : "ACQUIRETIMEOUT",
+			lockId : this.lockId,
+			nonce : []
+		};
+		pushIfDefined(msg.nonce, this.nonce);
+		writeJsonSafe(this.socket, msg);
 	};
 };
 
@@ -320,8 +368,8 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	this.isSocketReader = function(socket) {
 
 		for(var i = 0; i < this.readers.length; ++i) {
-			var readerSocket = this.readers[i];
-			if(readerSocket === socket)
+			var readerRequest = this.readers[i];
+			if(readerRequest.socket === socket)
 				return true;
 		}
 
@@ -350,49 +398,68 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	///
 	/// Does the real action of applying the read lock
 	///
-	this.lockRead = function(socket) {
+	this.lockRead = function(request) {
 
 		// Indicate lock set
-		log("Read locking " + this.lockId + "\n");
-		
-		// If this throw an error, then we know the socket is dead and we want the caller to try again
-		socket.write("LOCKED R " + this.lockId + "\n");
+		log("Read locking " + this.lockId);
+
+		var msg = {
+			status:"LOCKED",
+			lockId : this.lockId,
+			mode:"R",
+			nonce: []
+		};
+		pushIfDefined(msg.nonce, request.nonce);
+		writeJsonSafe(request.socket, msg);
 
 		// Add to the list of readers
-		this.readers.push(socket);
+		this.readers.push(request);
 	};
 
 	///
 	/// Does the real action of applying the write lock
 	///
-	this.lockWrite = function(socket) {
+	this.lockWrite = function(request) {
 
 		// Be sure to remove any readers this might have
-		this.readers.remove(socket);
+		this.readers.removeIf(function(req) {
+			return req.socket == request.socket;
+		});
 
 		// Indicate lock set
-		log("Write locking " + this.lockId + "\n");
-		
-		// If this throw an error, then we know the socket is dead and we want the caller to try again
-		socket.write("LOCKED W " + this.lockId + "\n");
+		log("Write locking " + this.lockId);
 
-		// Add to the list of readers
-		this.writer = socket;
+		// If this throw an error, then we know the socket is dead and we want the caller to try again
+		var msg = {
+			status:"LOCKED",
+			lockId : this.lockId,
+			mode:"W",
+			nonce: []
+		}
+		pushIfDefined(msg.nonce, request.nonce);
+		if(writeJsonSafe(request.socket, msg))
+			this.writer = request;
 	};
 	
 	///
 	/// This will cause a socket to either immediately acquire the write lock or go into a queue waiting for it
 	///	
-	this.acquireRead = function (socket, timeout) {
+	this.acquireRead = function (socket, arguments) {
 
-		// Use default if not available
-		timeout = timeout || settings.defaultTimeout;
+		arguments.timeout = arguments.timeout || settings.defaultTimeout;
 
 		// Double-check this socket is not currently a reader
 		if(this.isSocketReader(socket) || this.writer === socket) {
 
 			log("Reader attempting to acquire lock already held: " + this.lockId);
-			socket.write("LOCKED R " + this.lockId + "\n");
+			var msg = {
+				status:"LOCKED",
+				lockId : this.lockId,
+				mode:"R",
+				nonce: []
+			}
+			pushIfDefined(msg.nonce, request.nonce);
+			writeJsonSafe(socket, msg);
 
 			return;
 		}
@@ -400,11 +467,18 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		// If we can acquire now, then do it!
 		if(this.isReadAvailable()) {
 
-			this.lockRead(socket);
+			this.lockRead(new LockRequest(socket, arguments));
 		} else {
 
-			// Respond with Pending status
-			writeSafe(socket, "LOCKPENDING R " + this.lockId + "\n");
+			var msg = {
+				status: "LOCKPENDING",
+				mode:"R",
+				lockId: this.lockId,
+				nonce: []
+			}
+			pushIfDefined(msg.nonce, arguments.nonce);
+			writeJsonSafe(socket, msg);
+			
 
 			// If we have to wait, then queue
 			var lock = this;
@@ -425,16 +499,22 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	///
 	/// This will cause a socket to either immdiately acquire the write lock or go into the queue waiting for it
 	///
-	this.acquireWrite = function(socket, timeout) {
-
-		// Use default if not available
-		timeout = timeout || settings.defaultTimeout;
+	this.acquireWrite = function(socket, args) {
+		
+		args.timeout = args.timeout || settings.defaultTimeout;
 
 		// Double-check this socket is not currently a reader
-		if(this.writer === socket) {
+		if(this.writer && this.writer.socket === socket) {
 
 			log("Writer attempting to acquire lock already held: " + this.lockId);
-			socket.write("LOCKED W " + this.lockId + "\n");
+			var msg = {
+				status:"LOCKED",
+				lockId : this.lockId,
+				mode:"W",
+				nonce: []
+			}
+			pushIfDefined(msg.nonce, args.nonce);
+			writeJsonSafe(socket, msg);
 
 			return;
 		}
@@ -442,20 +522,27 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		// If we can acquire now, then do it!
 		if(this.isWriteAvailable(socket)) {
 
-			this.lockWrite(socket);
+			this.lockWrite(new LockRequest(socket, args));
 		} else {
 			
 			// Respond with Pending status
-			writeSafe(socket, "LOCKPENDING W " + this.lockId + "\n");
+			var msg = {
+				status: "LOCKPENDING",
+				mode: "W",
+				lockId: this.lockId,
+				nonce: []
+			};
+			pushIfDefined(msg.nonce, args.nonce);
+			writeJsonSafe(socket, msg);
 
 			// If we have to wait, then queue
 			var lock = this;
-			this.writerQueue.createRequest(socket, this.lockId, timeout, function(request) {
+			this.writerQueue.createRequest(socket, this.lockId, args.timeout, function(request) {
 				
 				// if the lock is available, then lock it
 				if(lock.isWriteAvailable()) {
 					
-					this.lockWrite(socket);
+					this.lockWrite(request);
 				} else {
 
 					request.timeout();
@@ -476,21 +563,22 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 
 			var nextReader = this.readerQueue.findPendingRequest();
 			if(nextReader != null)
-				this.lockRead(nextReader.socket);
+				this.lockRead(nextReader);
 		}
 
-		// Apply the writer
-		if(this.writerQueue.hasRequests() && this.isWriteAvailable()) {
+		// Burn through all possible write requests
+		while(this.writerQueue.hasRequests() && this.isWriteAvailable()) {
 
 			var nextWriter = this.writerQueue.findPendingRequest();
-			this.lockWrite(nextWriter.socket);
+			if(nextWriter != null)
+				this.lockWrite(nextWriter);
 		}
 	}
 	
 	///
 	/// This will cause the given socket to release its lock on it (be it read or write)
 	///
-	this.release = function(socket, reportNoLocks) {
+	this.release = function(socket, nonce, reportNoLocks) {
 
 		if(reportNoLocks === undefined)
 			reportNoLocks = true;
@@ -502,11 +590,24 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		var someLockReleased = false;
 
 		// Check if we're releasing the writer
-		if(this.writer == socket) {
+		if(this.writer && this.writer.socket == socket) {
 			
 			log("Releasing write lock for " + this.lockId);
+
+			// Respond to the socket
+			var msg = {
+				status: "RELEASED",
+				mode: "W",
+				lockId: this.lockId,
+				nonce: []
+			};
+			pushIfDefined(msg.nonce, this.writer.nonce);
+			pushIfDefined(msg.nonce, nonce);
+			writeJsonSafe(this.writer.socket, msg);
+			
+			// Clear the writer request
 			this.writer = null;
-			writeSafe(socket, "RELEASED " + this.lockId + "\n");
+
 			someLockReleased = true;
 		}
 
@@ -514,8 +615,21 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		if(this.isSocketReader(socket)) {
 
 			log("Releasing write lock for " + this.lockId);
-			this.readers.remove(socket);
-			writeSafe(socket, "RELEASED " + this.lockId + "\n");
+			
+			// Remove it from the reader list
+			var request = this.readers.findAndRemoveIf(function(item) { item.socket === socket; });
+
+			// Repond to the socket
+			var msg = {
+				status: "RELEASED",
+				mode: "R",
+				lockId: this.lockId,
+				nonce: []
+			};
+			pushIfDefined(msg.nonce, request ? request.nonce : null);
+			pushIfDefined(msg.nonce, nonce);
+			writeJsonSafe(this.writer.socket, msg);
+
 			someLockReleased = true;
 		}
 
@@ -524,7 +638,15 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 			// Try to notify there is lock lock
 			// NOTE: This assumes the socket may be dead
 			log("Could not find lock to release by ID" + this.lockId)
-			writeSafe(socket, "NOLOCKTORELEASE " + this.lockId + "\n");
+			
+			var msg = {
+				status: "NOLOCKTORELEASE",
+				lockId: this.lockId,
+				nonce: []
+			};
+			pushIfDefined(msg.nonce, nonce);
+			writeJsonSafe(msg);
+
 			return;
 		} else {
 
@@ -546,10 +668,10 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 		this.release(this.writer);
 
 		var anyLocksReleased = false;
-		this.readers.removeIf(function(socket) { return true; },
-			function(socket) {
+		this.readers.removeIf(function(request) { return true; },
+			function(request) {
 				anyLocksReleased = true;
-				this.release(socket);
+				this.release(request.socket);
 			});
 
 		return anyLocksReleased;
@@ -558,9 +680,13 @@ var ReaderWriterLock = function(lockId, greedyReaders) {
 	///
 	/// Returns a string descriptor for the state of this lock
 	///
-	this.show = function() {
+	this.show = function(socket) {
 
-		return this.lockId;
+		var ret = {
+			lockId: this.lockId
+		};
+
+		return ret;
 	};
 }
 
@@ -602,75 +728,83 @@ var LockCollection = function() {
 	///
 	/// Acquires the given read lock
 	///
-	this.acquireRead = function(socket, lockId, timeout) {
+	this.acquireRead = function(socket, arguments) {
 		
-		var lock = this.getLock(lockId);
+		var lock = this.getLock(arguments.lockId);
 
-		lock.acquireRead(socket, timeout);
+		lock.acquireRead(socket, arguments);
 	};
 
 	///
 	/// Acquire the given write lock
 	///
-	this.acquireWrite = function(socket, lockId, timeout) {
+	this.acquireWrite = function(socket, arguments) {
 
-		var lock = this.getLock(lockId);
+		var lock = this.getLock(arguments.lockId);
 
-		lock.acquireWrite(socket, timeout);
+		lock.acquireWrite(socket, arguments);
 	};
 	
 	///
 	/// Releases the given lock, then passes it to anyone waiting
 	///
-	this.release = function(socket, lockId) {
+	this.release = function(socket, lockId, nonce) {
 		
 		var lock = this.getLock(lockId);
 
-		lock.release(socket);
+		lock.release(socket, nonce);
 
 		this.cleanupLock(lock);
 	};
 	
 	///
-	/// Sends back a comma-delimited list of locks, describing those currently held
+	/// Sends back a description of the currently occupied locks
 	///
-	this.show = function(socket) {
+	this.show = function(socket, nonce) {
 		
 		log("Showing locks");
 				
-		var ret = "";
+		var lockInfo = [];
 		
 		for(var lockId in this.locks) {
-			
-			ret = ret != "" ? ret + "," : ret;
 			 
 			var lock = this.locks[lockId];
-			ret += lock.show();
+			lockInfo.push(lock.show(socket));
 		}
 		
+		var ret = {
+			status: "SHOW",
+			locks: lockInfo,
+			nonce: []
+		};
+		pushIfDefined(ret.nonce, nonce);
 		return ret;
 	};
 	
 	///
 	/// Releases all lock held by the given socket
 	///
-	this.releaseAll = function(socket) {
+	this.releaseAll = function(socket, nonce, reportNoLocks) {
 		
+		// Set default argument of reporting no locks
+		reportNoLocks = reportNoLocks === undefined ? true : reportNoLocks;
+
 		log("Releasing ALL locks for the socket");
 		
 		var locksReleased = false;
 
 		for(var lockId in this.locks) {
 			var lock = this.locks[lockId];
-			var anyLockRelease = lock.release(socket, false);
+			var anyLockRelease = lock.release(socket, nonce, false);
 			locksReleased = anyLockRelease ? true : locksReleased;
 			if(lock.isAbandoned())
 				delete this.locks[lockId];
 		}
 
-		if(!locksReleased) {
-
-			writeSafe(socket, "NOLOCKSTORELEASEALL\n");
+		if(!locksReleased && reportNoLocks) {
+			var msg = { status : "NOLOCKSTORELEASEALL", nonce:[] };
+			pushIfDefined(msg.nonce, nonce);
+			writeJsonSafe(socket, msg);
 		}
 	};
 };
@@ -691,24 +825,34 @@ var LockInterface = function(net) {
 	this.locks = new LockCollection();
 	
 	///
-	/// Responds to the show command with info for all locks
-	///
-	this.show = function(socket) {
-		
-		var description = this.locks.show();
-		writeSafe(socket, "SHOW " + description + "\n");
-	};
-	
-	///
 	/// Responds with a spiritually useful quote from a great philosopher
 	///
-	this.wisdom = function(socket) {
+	this.wisdom = function(nonce) {
+
+		log("Sharing the wisdom of eternia");
 		
 		var randomIndex = Math.floor(Math.random()*dolph.length);
 
 		var quote = dolph[randomIndex];
 		
-		writeSafe(socket, "WISDOM " + quote + "\n");
+		var ret = {
+			status: "WISDOM",
+			quote: quote,
+			nonce: []
+		};
+		pushIfDefined(ret.nonce, nonce);
+
+		return ret;
+	};
+
+	///
+	/// Releases all locks on the socket, sends a final status, then closes the socket
+	///
+	this.quit = function(socket, nonce) {
+		this.locks.releaseAll(socket, nonce, false);
+		socket.removeAllListeners();
+		var msg = {status: "GOINPIECES", nonce: [nonce]};
+		endJsonSafe(socket, msg);
 	};
 	
 	///
@@ -718,56 +862,67 @@ var LockInterface = function(net) {
 		
 		data = data.toString().trim();
 		
-		log("Received data: '" + data + "'\n");
+		log("Received data: '" + data + "'");
 		
-		var args = data.split(" ");
-		var commandName = args[0];
+		var args = parseSafe(data);	
+		try
+		{
+			args.command = args.command.toUpperCase();	
+		}
+		catch(err) { }
 		
-		commandName = commandName.toUpperCase();
 		
-		switch(commandName) {
+		switch(args.command) {
 			
 			case "WISDOM":
-				this.wisdom(socket);
+				writeJsonSafe(socket, this.wisdom(args.nonce));
 				break;
 			
 			case "ACQUIRE":
 
 				// Check arguments
-				if(args[1] == undefined) {
-					socket.write("CANNOTACQUIREINVALIDLOCKID");
+				if(args.lockId === undefined) {
+					var msg = {
+						status: "CANNOTACQUIREINVALIDLOCKID",
+						nonce: []
+					};
+					pushIfDefined(msg.nonce, args.nonce);
+					writeJsonSafe(socket, msg);
 					break;
 				}
 
-				var mode = args[3] || "W";
-				mode = mode.toUpperCase();
-				if(mode == "W")
-					this.locks.acquireWrite(socket, args[1], args[2]);
+				args.mode = args.mode || "W";
+
+				if(args.mode == "W")
+					this.locks.acquireWrite(socket, args);
 				else
-					this.locks.acquireRead(socket, args[1], args[2]);
+					this.locks.acquireRead(socket, args);
 				break;
 				
 			case "RELEASE":
-				this.locks.release(socket, args[1]);
+				this.locks.release(socket, args.lockId, args.nonce);
 				break;
 				
 			case "RELEASEALL":
-				this.locks.releaseAll(socket);
+				writeJsonSafe(this.locks.releaseAll(socket, args.nonce));
 				break;
 				
 			case "SHOW":
-				this.show(socket);
+				writeJsonSafe(socket, this.locks.show(socket, args.nonce));
 				break;
 
 			case "QUIT":
-				this.locks.releaseAll(socket);
-				socket.removeAllListeners();
-				endSafe(socket, "GOINPIECES\n");
+				this.quit(socket, args.nonce);
 				break;
 				
 			default:
-				socket.write("COMMANDNOTFOUND\n");
+				log("Could not find command " + args.command);
+				var ret = { status : "COMMANDNOTFOUND", nonce: []};
+				pushIfDefined(ret.nonce, args.nonce);
+				writeJsonSafe(socket, ret);
 		}
+
+		log("\n");
 	};
 	
 	///
@@ -790,7 +945,8 @@ var LockInterface = function(net) {
 			log("Socket Connected...");
 
 			// Write to the socket to give it a try, aborting if we can't
-			if(!writeSafe(socket, "IMUSTBLOCKYOU\n")) {
+			var msg = { status: "IMUSTBLOCKYOU" };
+			if(!writeJsonSafe(socket, msg)) {
 				return;
 			}
 	
@@ -811,7 +967,7 @@ var LockInterface = function(net) {
 	}
 };
 
-// START
+// START ====================================================
 
 var net = require('net');
 
