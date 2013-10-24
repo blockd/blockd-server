@@ -42,30 +42,36 @@ OR
 nc localhost 11311
 ```
 
-The node server will respond and you've started a new session. To double-check commands are registering, try asking for some wisdowm:
+The node server will respond and you've started a new session. To start, let's try asking for some wisdom from a great philosopher:
 
 ```
 wisdom
 ```
 
-You will be immediately granted enlightenment. Next, you'll probably want to try acquiring a lock:
+You will be immediately granted enlightenment. 
+
+Next, you'll probably want to try acquiring a lock:
 
 ```
 lock HelloWorld
 ```
 
-The server should echo back the lock being acquired. If you want to see the current status, send the show command:
+The server should echo back the lock being acquired. 
+
+If you want to see the current status, send the show command:
 
 ```
 show
 ```
-You will receive a list of currently acquired locks on the server. To release the lock, try the release command:
+You will receive a list of currently acquired locks on the server. 
+
+To release the lock, try the release command:
 
 ```
 release HelloWorld
 ```
 
-That will let go of the lock.
+That will let go of the lock, allowing subsequent requests access to it.
 
 From this simple functionality you can more easily coordinate resources between multiple applications distributed between many hosts.
 
@@ -74,3 +80,4 @@ Notes
 Here are some special details about the behavior of the system:
 
 * Commands are NOT case-sensitive; however, lock identifiers are case-sensitive. That means "HelloWorld" is a different lock than "helloworld".
+* Blockd does NOT currently implement any system of failover, so all client implementations must decide how to respond during loss of contact with the server.
