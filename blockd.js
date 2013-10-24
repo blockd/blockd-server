@@ -864,7 +864,17 @@ var LockInterface = function(net) {
 		
 		log("Received data: '" + data + "'");
 		
-		var args = parseSafe(data);	
+		var args = parseSafe(data);
+
+		if(args.command == undefined) {
+			log("Converting space-delimited to JSON");
+			var split = data.split(" ");
+			args = {
+				command : split[0],
+				lockId: split[1]
+			};
+		}
+
 		try
 		{
 			args.command = args.command.toUpperCase();	
