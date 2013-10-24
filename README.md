@@ -32,10 +32,14 @@ node blockd.js
 
 This will start the blockd node. It will echo its port back, by default 8000.
 
-Open up a new command-line window and use netcat to connect to the server and start an interactive TCP session:
+Open up a new command-line window and use netcat or telnet to connect to the server and start an interactive TCP session:
 
 ```
-nc localhost 8000
+telnet localhost 11311
+
+OR
+
+nc localhost 11311
 ```
 
 The node server will respond and you've started a new session. To double-check commands are registering, try asking for some wisdowm:
@@ -61,7 +65,9 @@ You will receive a list of currently acquired locks on the server. To release th
 release HelloWorld
 ```
 
-That will let go of the lock. You can verify with another lock command.
+That will let go of the lock.
+
+From this simple functionality you can more easily coordinate resources between multiple applications distributed between many hosts.
 
 Notes
 -------------
