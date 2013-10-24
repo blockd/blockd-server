@@ -6,16 +6,24 @@ What is It?
 -------------
 Need to coordinate resources between multiple applications, but instances running on different servers? Don't like complicated APIs? Have a more than passing affinity for Dolph Lundgren?
 
-Blockd allows multiple clients to acquire and release "locks", just simple string identifiers, using a simple asynchronous API. It supports variable timeout and reader-writer locking, plus the ability to immediately 
+Blockd allows multiple clients to acquire and release "locks", just simple string identifiers, using a simple asynchronous API. It supports variable timeout and reader-writer locking.
 
 Blockd was created by Flex Rental Solutions to manage real-time availability of documents in our system across multiple instances of a Java app. We needed a simple solution.
+
+As of this writing, Blockd features client libraries in both Node.js and Java.
 
 Why Node?
 -------------
 When tracking through SQL and memcache didn't work, we turned to Node.Js. Its simple TCP support made it easy to prototype. The single-threaded event loop model meant blockd could forego using locks internally.
 
+Protocol
+-------------
+Blockd uses a simple JSON protocol, with an ability to take in simple space-delimited input for command-line testing.
+
 A Simple Example
 -------------
+This example allows the user to quickly and easily try out the system without using a client and just using the command-line.
+
 To run blockd, install Node, open a command-line, navigate to the blockd directory, and run the following command:
 
 ```
