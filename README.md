@@ -1,8 +1,8 @@
-Blockd Node Client
+Blockd
 =============
-The node client for a simple distributed lock server in Node.js
+A simple distributed lock server in Node.js
 
-What is Blockd?
+What is It?
 -------------
 Need to coordinate resources between multiple applications, but instances running on different servers? Don't like complicated APIs? Have a more than passing affinity for Dolph Lundgren?
 
@@ -14,41 +14,49 @@ Why Node?
 -------------
 When tracking through SQL and memcache didn't work, we turned to Node.Js. Its simple TCP support made it easy to prototype. The single-threaded event loop model meant blockd could forego using locks internally.
 
-What does this client do?
+A Simple Example
 -------------
-This client is the Node.js implementation of asynchronous communication with the Blockd server. It features a simplified promise-based API for locking and releasing, supporting all features of the server in one simple package.
+To run blockd, install Node, open a command-line, navigate to the blockd directory, and run the following command:
 
-Examples
+```
+node blockd.js
+```
+
+This will start the blockd node. It will echo its port back, by default 8000.
+
+Open up a new command-line window and use netcat to connect to the server and start an interactive TCP session:
+
+```
+nc localhost 8000
+```
+
+The node server will respond and you've started a new session. To double-check commands are registering, try asking for some wisdowm:
+
+```
+wisdom
+```
+
+You will be immediately granted enlightenment. Next, you'll probably want to try acquiring a lock:
+
+```
+lock HelloWorld
+```
+
+The server should echo back the lock being acquired. If you want to see the current status, send the show command:
+
+```
+show
+```
+You will receive a list of currently acquired locks on the server. To release the lock, try the release command:
+
+```
+release HelloWorld
+```
+
+That will let go of the lock. You can verify with another lock command.
+
+Notes
 -------------
-A simple example of creating a client connection, passing the port and host address:
+Here are some special details about the behavior of the system:
 
-```javascript
-var client = new BlockdClient(11311, "localhost");
-```
-
-Then proceed with opening the connection and acquiring a lock:
-
-```javascript
-client.open().then(function() {
-
-	client.acquire("HELLO").then(function() { 
-
-			// Do work with the resource
-
-		});
-	});
-```
-
-After completing interaction with the resource, the app can release (and close once done interacting with the system) the connection as follows:
-
-```javascript
-client.release("HELLO").then(function() {
-
-		// Do work with the resource now that it is released
-
-		client.close().then(function() {
-
-			// Do any work after the client closes
-		});
-	});
-```
+* Commands are NOT case-sensitive; however, lock identifiers are case-sensitive. That means "HelloWorld" is a different lock than "helloworld".
