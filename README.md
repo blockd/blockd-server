@@ -30,7 +30,7 @@ To run blockd, install Node, open a command-line, navigate to the blockd directo
 node blockd.js
 ```
 
-This will start the blockd node. It will echo its port back, by default 8000.
+This will start the blockd node. It will echo its port back, by default 11311.
 
 Open up a new command-line window and use netcat or telnet to connect to the server and start an interactive TCP session:
 
